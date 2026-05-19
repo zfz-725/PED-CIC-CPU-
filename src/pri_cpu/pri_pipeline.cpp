@@ -10,6 +10,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "pri_cpu.h"
@@ -103,6 +104,25 @@ std::string BucketKey(int band, uint32_t bucket_id) {
 uint64_t StableNonce(const std::string& bucket_key) {
     return static_cast<uint64_t>(std::hash<std::string>{}(bucket_key));
 }
+
+struct SignatureKey {
+    std::vector<uint32_t> values;
+
+    bool operator==(const SignatureKey& other) const {
+        return values == other.values;
+    }
+};
+
+struct SignatureKeyHash {
+    size_t operator()(const SignatureKey& key) const {
+        uint64_t hash = 1469598103934665603ULL;
+        for (uint32_t value : key.values) {
+            hash ^= static_cast<uint64_t>(value);
+            hash *= 1099511628211ULL;
+        }
+        return static_cast<size_t>(hash);
+    }
+};
 
 void EnsureDir(const fs::path& p) {
     if (!fs::exists(p)) {
@@ -254,28 +274,62 @@ int RunPipeline(const PipelineConfig& cfg, PipelineStats& stats) {
     }
     stats.requested_docs = static_cast<int64_t>(requested_doc_set.size());
 
-    std::unordered_map<int, std::vector<uint32_t>> encrypted_by_doc;
-    encrypted_by_doc.reserve(requested_doc_set.size());
-    std::string cpu_error;
+    std::vector<int> requested_docs(requested_doc_set.begin(), requested_doc_set.end());
+    std::sort(requested_docs.begin(), requested_docs.end());
+
+    std::unordered_map<SignatureKey, size_t, SignatureKeyHash> signature_to_unique;
+    signature_to_unique.reserve(requested_docs.size());
+    std::vector<std::vector<uint32_t>> unique_signatures;
+    unique_signatures.reserve(requested_docs.size());
+    std::vector<size_t> doc_to_unique(requested_docs.size(), 0U);
+    for (size_t i = 0; i < requested_docs.size(); ++i) {
+        const int doc_idx = requested_docs[i];
+        SignatureKey key{docs[doc_idx].signature};
+        auto inserted = signature_to_unique.emplace(std::move(key), unique_signatures.size());
+        if (inserted.second) {
+            unique_signatures.push_back(inserted.first->first.values);
+        }
+        doc_to_unique[i] = inserted.first->second;
+    }
+
+    std::vector<std::vector<uint32_t>> unique_encrypted_results(unique_signatures.size());
+    std::vector<std::string> encrypt_errors(unique_signatures.size());
+    std::vector<unsigned char> encrypt_ok(unique_signatures.size(), 0U);
     const uint64_t nonce = StableNonce("pri_cpu_global_compare_domain");
-    for (int doc_idx : requested_doc_set) {
+
+#pragma omp parallel for schedule(dynamic)
+    for (int i = 0; i < static_cast<int>(unique_signatures.size()); ++i) {
+        std::string local_error;
         std::vector<uint32_t> encrypted;
-        if (!EncryptSignaturesCPU(
-                docs[doc_idx].signature,
+        if (EncryptSignaturesCPU(
+                unique_signatures[static_cast<size_t>(i)],
                 cfg.num_hash,
                 cfg.mode,
                 cfg.secure_hash_key,
                 cfg.oprf_key,
                 nonce,
                 encrypted,
-                cpu_error)) {
-            throw std::runtime_error("CPU 加密失败: " + cpu_error);
+                local_error)) {
+            unique_encrypted_results[static_cast<size_t>(i)] = std::move(encrypted);
+            encrypt_ok[static_cast<size_t>(i)] = 1U;
+        } else {
+            encrypt_errors[static_cast<size_t>(i)] = std::move(local_error);
         }
-        encrypted_by_doc.emplace(doc_idx, std::move(encrypted));
+    }
+
+    std::unordered_map<int, std::vector<uint32_t>> encrypted_by_doc;
+    encrypted_by_doc.reserve(requested_docs.size());
+    for (size_t i = 0; i < requested_docs.size(); ++i) {
+        const size_t unique_idx = doc_to_unique[i];
+        if (encrypt_ok[unique_idx] == 0U) {
+            throw std::runtime_error("CPU 加密失败: " + encrypt_errors[unique_idx]);
+        }
+        encrypted_by_doc.emplace(requested_docs[i], unique_encrypted_results[unique_idx]);
     }
     stats.phase_request_encrypt_s = std::chrono::duration<double>(clock::now() - phase2_start).count();
 
     const auto phase3_start = clock::now();
+    std::string cpu_error;
     std::unordered_set<uint64_t> unique_pairs;
     const int threshold_count = static_cast<int>(cfg.similarity_threshold * static_cast<double>(cfg.num_hash));
     for (const auto& bucket_key : shared_bucket_keys) {

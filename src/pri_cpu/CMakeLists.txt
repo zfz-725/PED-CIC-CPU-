@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
 
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+find_package(OpenMP)
 enable_testing()
 
 add_executable(pri_cpu_main
@@ -16,6 +17,9 @@ add_executable(pri_cpu_main
 )
 target_include_directories(pri_cpu_main PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pri_cpu_main PRIVATE OpenSSL::Crypto)
+if (OpenMP_CXX_FOUND)
+    target_link_libraries(pri_cpu_main PRIVATE OpenMP::OpenMP_CXX)
+endif ()
 
 add_executable(pri_cpu_benchmark
     pri_benchmark.cpp
