@@ -124,6 +124,36 @@ bool TestSha256FindSimilarPairs() {
     return true;
 }
 
+bool TestOprfFindSimilarPairs() {
+    const int num_hash = 4;
+    const int docs = 3;
+    const int threshold = 3;
+    const std::vector<uint32_t> signatures = {
+        1, 2, 3, 4,
+        1, 2, 9, 4,
+        7, 8, 9, 0
+    };
+    std::vector<uint32_t> encrypted;
+    std::string err;
+    bool ok = pri::EncryptSignaturesCPU(
+        signatures,
+        num_hash,
+        pri::EncryptMode::kOprf,
+        0x9e3779b97f4a7c15ULL,
+        0xd1b54a32d192ed03ULL,
+        12345ULL,
+        encrypted,
+        err);
+    if (!Expect(ok, "OPRF 加密调用失败: " + err)) return false;
+    if (!Expect(encrypted.size() == signatures.size(), "OPRF 输出应为每个签名分量 1 个 uint32_t")) return false;
+    std::vector<std::pair<int, int>> pairs;
+    ok = pri::FindSimilarPairsCPU(encrypted, docs, num_hash, threshold, pairs, err);
+    if (!Expect(ok, "OPRF 相似对查找失败: " + err)) return false;
+    if (!Expect(pairs.size() == 1U, "OPRF 相似对数量不正确")) return false;
+    if (!Expect(pairs.front().first == 0 && pairs.front().second == 1, "OPRF 相似对应为(0,1)")) return false;
+    return true;
+}
+
 bool TestInvalidArgs() {
     std::vector<uint32_t> out;
     std::string err;
@@ -151,6 +181,7 @@ int main() {
         TestEncryptOprfDeterministic() &&
         TestFindSimilarPairs() &&
         TestSha256FindSimilarPairs() &&
+        TestOprfFindSimilarPairs() &&
         TestInvalidArgs();
     if (!ok) return 1;
     std::cout << "pri_cpu_test passed\n";

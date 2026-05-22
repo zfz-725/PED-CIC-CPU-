@@ -165,7 +165,7 @@ def compute_perplexity(model, loader: DataLoader, device: str) -> float:
 def pri_cross_client_deduplicate(
     client_data: List[List[str]],
     work_dir: str,
-    fed_bin: str,
+    ped_cic_bin: str,
     pri_cpu_bin: str,
     mode: str,
     num_hash: int,
@@ -177,8 +177,8 @@ def pri_cross_client_deduplicate(
         raise ValueError(f"mode 仅支持 sha/oprf，当前: {mode}")
 
     pri_bin = pri_cpu_bin
-    if not Path(fed_bin).exists():
-        raise FileNotFoundError(f"未找到 FED CPU 可执行文件: {fed_bin}")
+    if not Path(ped_cic_bin).exists():
+        raise FileNotFoundError(f"未找到 PED-CIC CPU 可执行文件: {ped_cic_bin}")
     if not Path(pri_bin).exists():
         raise FileNotFoundError(f"未找到 PRI CPU 可执行文件: {pri_bin}")
 
@@ -206,7 +206,7 @@ def pri_cross_client_deduplicate(
         dst_dir = lsh_root / inst_name
         dst_dir.mkdir(parents=True, exist_ok=True)
         subprocess.run(
-            [fed_bin, str(src_dir), str(dst_dir), "--keep-hash"],
+            [ped_cic_bin, str(src_dir), str(dst_dir), "--keep-hash"],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,

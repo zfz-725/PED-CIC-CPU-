@@ -2,7 +2,7 @@
 
 #include <filesystem>
 
-namespace fed_cpu {
+namespace ped_cic_cpu {
 
 struct LshConfig {
     int num_hash = 128;
@@ -11,6 +11,8 @@ struct LshConfig {
     int num_key = 10240;
     double threshold = 0.8;
     int min_text_len = 0;
+    bool keep_hash = true;
+    bool normalize_utf8 = false;
 };
 
 struct LshStats {
@@ -18,6 +20,7 @@ struct LshStats {
     int docs = 0;
     int local_duplicate_pairs = 0;
     int local_delete_docs = 0;
+    bool utf8_normalization_fallback = false;
     double minhash_s = 0.0;
     double local_dedup_s = 0.0;
     double total_s = 0.0;

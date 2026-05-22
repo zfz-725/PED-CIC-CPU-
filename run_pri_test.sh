@@ -4,7 +4,7 @@ set -euo pipefail
 TEST_DATA_DIR="./test_data/test_institutions"
 LSH_OUTPUT_DIR="./test_data/lsh_results"
 PRI_CPU_OUTPUT_DIR="./test_output_pri_cpu"
-FED_BIN="${FED_BIN:-./build_cpu/fed_lsh_cpu}"
+PED_CIC_BIN="${PED_CIC_BIN:-./build_cpu/ped_cic_lsh_cpu}"
 PRI_CPU_BIN_CMAKE="${PRI_CPU_BIN:-./src/pri_cpu/build_cpu/pri_cpu_main}"
 PRI_CPU_BIN_GPP="./src/pri_cpu/build_gpp/pri_cpu_main"
 REGEN_LSH="${REGEN_LSH:-0}"
@@ -55,7 +55,7 @@ print(f"{a + b:.6f}")
 PY
 }
 
-parse_fed_timings_from_log() {
+parse_ped_cic_timings_from_log() {
     python3 - "$1" <<'PY'
 import re
 import sys
@@ -283,19 +283,19 @@ clear_dir_content "$PRI_CPU_OUTPUT_DIR"
 mkdir -p "$(dirname "$PRI_CPU_LOG_FILE")"
 exec > >(tee "$PRI_CPU_LOG_FILE") 2>&1
 
-echo "=== 隐私增强 FED 去重工具测试（CPU-only）==="
+echo "=== 隐私增强 PED-CIC 去重工具测试（CPU-only）==="
 echo ""
 
 lsh_reused_existing="1"
 lsh_total_seconds="-1.000000"
 local_dedup_total_seconds="-1.000000"
-fed_local_total_seconds="-1.000000"
+ped_cic_local_total_seconds="-1.000000"
 lsh_split_valid="1"
 lsh_per_inst_lines=""
 
 if [ "$REGEN_LSH" = "1" ]; then
-    if [ ! -x "$FED_BIN" ]; then
-        echo "REGEN_LSH=1 时未找到 CPU 可执行文件: $FED_BIN"
+    if [ ! -x "$PED_CIC_BIN" ]; then
+        echo "REGEN_LSH=1 时未找到 CPU 可执行文件: $PED_CIC_BIN"
         exit 1
     fi
     clear_dir_content "$LSH_OUTPUT_DIR"
@@ -304,7 +304,7 @@ if [ "$REGEN_LSH" = "1" ]; then
     lsh_reused_existing="0"
     lsh_total_seconds="0.000000"
     local_dedup_total_seconds="0.000000"
-    fed_local_total_seconds="0.000000"
+    ped_cic_local_total_seconds="0.000000"
     for inst_dir in "$TEST_DATA_DIR"/*; do
         if [ -d "$inst_dir" ]; then
             inst_name=$(basename "$inst_dir")
@@ -313,11 +313,11 @@ if [ "$REGEN_LSH" = "1" ]; then
             echo "处理机构: $inst_name"
             inst_log_tmp=$(mktemp)
             t_start=$(date +%s.%N)
-            "$FED_BIN" "$inst_dir" "$inst_lsh_output" --keep-hash 2>&1 | tee "$inst_log_tmp"
+            "$PED_CIC_BIN" "$inst_dir" "$inst_lsh_output" --keep-hash 2>&1 | tee "$inst_log_tmp"
             t_end=$(date +%s.%N)
             inst_elapsed=$(seconds_diff "$t_start" "$t_end")
-            fed_local_total_seconds=$(seconds_add "$fed_local_total_seconds" "$inst_elapsed")
-            inst_timing_tuple=$(parse_fed_timings_from_log "$inst_log_tmp")
+            ped_cic_local_total_seconds=$(seconds_add "$ped_cic_local_total_seconds" "$inst_elapsed")
+            inst_timing_tuple=$(parse_ped_cic_timings_from_log "$inst_log_tmp")
             rm -f "$inst_log_tmp"
             inst_lsh_seconds="${inst_timing_tuple%%|*}"
             inst_tail="${inst_timing_tuple#*|}"
@@ -342,7 +342,7 @@ for fn in os.listdir(sys.argv[1]):
 print(cnt)
 PY
 )
-            lsh_per_inst_lines="${lsh_per_inst_lines}${inst_name}_docs=${inst_docs}\n${inst_name}_fed_local_total_s=${inst_elapsed}\n${inst_name}_lsh_generate_s=${inst_lsh_seconds}\n${inst_name}_local_dedup_s=${inst_local_dedup_seconds}\n"
+            lsh_per_inst_lines="${lsh_per_inst_lines}${inst_name}_docs=${inst_docs}\n${inst_name}_ped_cic_local_total_s=${inst_elapsed}\n${inst_name}_lsh_generate_s=${inst_lsh_seconds}\n${inst_name}_local_dedup_s=${inst_local_dedup_seconds}\n"
             echo ""
         fi
     done
@@ -362,19 +362,19 @@ else
         exit 1
     fi
     if [ -f "$LSH_COMMON_STATS_FILE" ]; then
-        existing_lsh_total=$(read_key_from_file "$LSH_COMMON_STATS_FILE" "fed_lsh_generate_total_s")
+        existing_lsh_total=$(read_key_from_file "$LSH_COMMON_STATS_FILE" "ped_cic_lsh_generate_total_s")
         if [ -n "$existing_lsh_total" ]; then
             lsh_total_seconds="$existing_lsh_total"
         fi
-        existing_local_dedup_total=$(read_key_from_file "$LSH_COMMON_STATS_FILE" "fed_local_dedup_total_s")
+        existing_local_dedup_total=$(read_key_from_file "$LSH_COMMON_STATS_FILE" "ped_cic_local_dedup_total_s")
         if [ -n "$existing_local_dedup_total" ]; then
             local_dedup_total_seconds="$existing_local_dedup_total"
         fi
-        existing_fed_local_total=$(read_key_from_file "$LSH_COMMON_STATS_FILE" "fed_local_total_s")
-        if [ -n "$existing_fed_local_total" ]; then
-            fed_local_total_seconds="$existing_fed_local_total"
+        existing_ped_cic_local_total=$(read_key_from_file "$LSH_COMMON_STATS_FILE" "ped_cic_local_total_s")
+        if [ -n "$existing_ped_cic_local_total" ]; then
+            ped_cic_local_total_seconds="$existing_ped_cic_local_total"
         elif [ -n "$existing_lsh_total" ]; then
-            fed_local_total_seconds="$existing_lsh_total"
+            ped_cic_local_total_seconds="$existing_lsh_total"
         fi
     fi
 fi
@@ -395,9 +395,9 @@ lsh_hash_bin_count="${lsh_stats##*|}"
     echo "lsh_inst_dirs=$lsh_inst_dir_count"
     echo "lsh_hash_bins=$lsh_hash_bin_count"
     echo "lsh_reused_existing=$lsh_reused_existing"
-    echo "fed_lsh_generate_total_s=$lsh_total_seconds"
-    echo "fed_local_dedup_total_s=$local_dedup_total_seconds"
-    echo "fed_local_total_s=$fed_local_total_seconds"
+    echo "ped_cic_lsh_generate_total_s=$lsh_total_seconds"
+    echo "ped_cic_local_dedup_total_s=$local_dedup_total_seconds"
+    echo "ped_cic_local_total_s=$ped_cic_local_total_seconds"
     echo "pri_shared_lsh_generate_total_s=$lsh_total_seconds"
     if [ -n "$lsh_per_inst_lines" ]; then
         printf "%b" "$lsh_per_inst_lines"

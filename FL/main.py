@@ -19,7 +19,7 @@ from config import (
     MODEL_NAME,
     MODEL_PATH,
     PAD_TOKEN,
-    FED_BIN,
+    PED_CIC_BIN,
     PRI_BANDS,
     PRI_CPU_BIN,
     PRI_MODE,
@@ -74,7 +74,7 @@ def main():
         client_data = pri_cross_client_deduplicate(
             client_data=client_data,
             work_dir=PRI_WORK_DIR,
-            fed_bin=FED_BIN,
+            ped_cic_bin=PED_CIC_BIN,
             pri_cpu_bin=PRI_CPU_BIN,
             mode=PRI_MODE,
             num_hash=PRI_NUM_HASH,

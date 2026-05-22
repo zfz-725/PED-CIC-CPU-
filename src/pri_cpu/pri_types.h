@@ -20,7 +20,6 @@ struct DocLocation {
 struct DocRecord {
     int64_t uid = -1;
     DocLocation location;
-    std::vector<uint32_t> signature;
     std::vector<uint32_t> bucket_ids;
 };
 
@@ -40,11 +39,22 @@ struct PipelineStats {
     int64_t total_docs = 0;
     int64_t total_buckets = 0;
     int64_t shared_bucket_count = 0;
+    int64_t single_institution_bucket_count = 0;
+    int64_t total_bucket_assignments = 0;
+    int64_t shared_bucket_doc_assignments = 0;
     int64_t requested_docs = 0;
+    int64_t requested_unique_signatures = 0;
+    int64_t encrypted_feature_words = 0;
     int64_t duplicate_pairs = 0;
     int64_t delete_docs = 0;
+    double shared_bucket_ratio = 0.0;
+    double requested_doc_ratio = 0.0;
+    double exposed_signature_ratio = 0.0;
     double phase_bucket_submit_s = 0.0;
     double phase_request_encrypt_s = 0.0;
+    double phase_oprf_blind_s = 0.0;
+    double phase_oprf_kserver_eval_s = 0.0;
+    double phase_oprf_unblind_s = 0.0;
     double phase_global_match_s = 0.0;
     double phase_distribution_s = 0.0;
     double total_s = 0.0;

@@ -11,12 +11,13 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <unordered_set>
 #include <vector>
 
 namespace fs = std::filesystem;
 
-namespace fed_cpu {
+namespace ped_cic_cpu {
 namespace {
 
 class UnionFind {
@@ -77,6 +78,43 @@ std::string Trim(const std::string& value) {
     return value.substr(begin, end - begin);
 }
 
+int HexValue(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+bool ReadJsonHex4(const std::string& value, size_t pos, uint32_t& code) {
+    if (pos + 4U > value.size()) return false;
+    uint32_t result = 0;
+    for (size_t k = 0; k < 4U; ++k) {
+        const int hex = HexValue(value[pos + k]);
+        if (hex < 0) return false;
+        result = (result << 4U) | static_cast<uint32_t>(hex);
+    }
+    code = result;
+    return true;
+}
+
+void AppendUtf8(uint32_t code, std::string& out) {
+    if (code <= 0x7fU) {
+        out.push_back(static_cast<char>(code));
+    } else if (code <= 0x7ffU) {
+        out.push_back(static_cast<char>(0xc0U | (code >> 6U)));
+        out.push_back(static_cast<char>(0x80U | (code & 0x3fU)));
+    } else if (code <= 0xffffU) {
+        out.push_back(static_cast<char>(0xe0U | (code >> 12U)));
+        out.push_back(static_cast<char>(0x80U | ((code >> 6U) & 0x3fU)));
+        out.push_back(static_cast<char>(0x80U | (code & 0x3fU)));
+    } else if (code <= 0x10ffffU) {
+        out.push_back(static_cast<char>(0xf0U | (code >> 18U)));
+        out.push_back(static_cast<char>(0x80U | ((code >> 12U) & 0x3fU)));
+        out.push_back(static_cast<char>(0x80U | ((code >> 6U) & 0x3fU)));
+        out.push_back(static_cast<char>(0x80U | (code & 0x3fU)));
+    }
+}
+
 std::string JsonUnescape(const std::string& value) {
     std::string out;
     out.reserve(value.size());
@@ -95,16 +133,35 @@ std::string JsonUnescape(const std::string& value) {
             case 'n': out.push_back('\n'); break;
             case 'r': out.push_back('\r'); break;
             case 't': out.push_back('\t'); break;
-            case 'u':
-                out.append("\\u");
-                for (int k = 0; k < 4 && i + 1 < value.size(); ++k) out.push_back(value[++i]);
+            case 'u': {
+                uint32_t code = 0;
+                if (!ReadJsonHex4(value, i + 1, code)) {
+                    out.append("\\u");
+                    break;
+                }
+                i += 4;
+                if (code >= 0xd800U && code <= 0xdbffU && i + 2U < value.size() && value[i + 1] == '\\' && value[i + 2] == 'u') {
+                    uint32_t low = 0;
+                    if (ReadJsonHex4(value, i + 3, low) && low >= 0xdc00U && low <= 0xdfffU) {
+                        code = 0x10000U + ((code - 0xd800U) << 10U) + (low - 0xdc00U);
+                        i += 6;
+                    }
+                }
+                AppendUtf8(code, out);
                 break;
+            }
             default:
                 out.push_back(esc);
                 break;
         }
     }
     return out;
+}
+
+std::string NormalizeUtf8ForDedup(const std::string& text, const LshConfig& cfg, LshStats& stats) {
+    if (!cfg.normalize_utf8) return text;
+    stats.utf8_normalization_fallback = true;
+    throw std::runtime_error("当前构建暂未启用 Unicode NFC 归一化，请使用 --no-normalize-utf8");
 }
 
 std::string ExtractText(const std::string& line) {
@@ -210,6 +267,24 @@ void WriteHashBin(const fs::path& output_dir, const FileResult& result, const Ls
     }
 }
 
+void WriteBucketAssignmentsBin(const fs::path& output_dir, const FileResult& result, const LshConfig& cfg) {
+    fs::create_directories(output_dir);
+    const fs::path out_file = output_dir / (result.source.stem().string() + "_bucketassign.bin");
+    std::ofstream out(out_file, std::ios::binary);
+    if (!out.is_open()) {
+        throw std::runtime_error("无法写出桶归属文件: " + out_file.string());
+    }
+    const int cols = cfg.num_hash + cfg.bands;
+    for (int row = 0; row < result.lines; ++row) {
+        const size_t base = static_cast<size_t>(row) * static_cast<size_t>(cols) + static_cast<size_t>(cfg.num_hash);
+        out.write(reinterpret_cast<const char*>(result.row_major.data() + base),
+                  static_cast<std::streamsize>(static_cast<size_t>(cfg.bands) * sizeof(uint32_t)));
+    }
+    if (!out.good()) {
+        throw std::runtime_error("写出桶归属文件失败: " + out_file.string());
+    }
+}
+
 }
 
 LshStats RunDirectory(const fs::path& input_dir, const fs::path& output_dir, const LshConfig& cfg) {
@@ -242,7 +317,7 @@ LshStats RunDirectory(const fs::path& input_dir, const fs::path& output_dir, con
         result.source = file;
         std::string line;
         while (std::getline(in, line)) {
-            std::string text = ExtractText(line);
+            std::string text = NormalizeUtf8ForDedup(ExtractText(line), cfg, stats);
             if (cfg.min_text_len > 0 && static_cast<int>(text.size()) < cfg.min_text_len) {
                 text.clear();
             }
@@ -261,7 +336,10 @@ LshStats RunDirectory(const fs::path& input_dir, const fs::path& output_dir, con
             ++result.lines;
             ++stats.docs;
         }
-        WriteHashBin(output_dir, result, cfg);
+        if (cfg.keep_hash) {
+            WriteHashBin(output_dir, result, cfg);
+        }
+        WriteBucketAssignmentsBin(output_dir, result, cfg);
         file_results.push_back(std::move(result));
         ++stats.files;
     }
