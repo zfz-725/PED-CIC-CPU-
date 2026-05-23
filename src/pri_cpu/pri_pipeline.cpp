@@ -166,12 +166,12 @@ std::vector<uint32_t> LoadSignatureForDoc(const LocalDocRef& ref, int num_hash, 
     return signature;
 }
 
-std::string BucketKey(int band, uint32_t bucket_id) {
-    return std::to_string(band) + "#" + std::to_string(bucket_id);
+uint64_t MakeBucketKey(int band, uint32_t bucket_id) {
+    return (static_cast<uint64_t>(band) << 32) | bucket_id;
 }
 
-uint64_t StableNonce(const std::string& bucket_key) {
-    return static_cast<uint64_t>(std::hash<std::string>{}(bucket_key));
+uint64_t StableNonce(uint64_t bucket_key) {
+    return bucket_key * 0x9e3779b97f4a7c15ULL;
 }
 
 struct SignatureKey {
@@ -354,8 +354,8 @@ int RunPipeline(const PipelineConfig& cfg, PipelineStats& stats) {
     docs.reserve(1024);
 
     std::unordered_map<std::string, InstitutionState> institutions;
-    std::unordered_map<std::string, std::vector<int>> bucket_to_docs;
-    std::unordered_map<std::string, std::unordered_set<std::string>> bucket_to_insts;
+    std::unordered_map<uint64_t, std::vector<int>> bucket_to_docs;
+    std::unordered_map<uint64_t, std::unordered_set<std::string>> bucket_to_insts;
 
     const auto phase1_start = clock::now();
     const auto inst_dirs = SortedSubDirs(cfg.institution_root);
@@ -397,7 +397,7 @@ int RunPipeline(const PipelineConfig& cfg, PipelineStats& stats) {
                 const int doc_index = static_cast<int>(docs.size());
                 inst_state.local_docs.emplace(doc_index, LocalDocRef{hash_path, i});
                 for (int b = 0; b < cfg.bands; ++b) {
-                    const std::string key = BucketKey(b, rec.bucket_ids[b]);
+                    const uint64_t key = MakeBucketKey(b, rec.bucket_ids[b]);
                     bucket_to_docs[key].push_back(doc_index);
                     bucket_to_insts[key].insert(anon_inst_id);
                     ++stats.total_bucket_assignments;
@@ -411,7 +411,7 @@ int RunPipeline(const PipelineConfig& cfg, PipelineStats& stats) {
     stats.total_buckets = static_cast<int64_t>(bucket_to_docs.size());
     stats.phase_bucket_submit_s = std::chrono::duration<double>(clock::now() - phase1_start).count();
 
-    std::vector<std::string> shared_bucket_keys;
+    std::vector<uint64_t> shared_bucket_keys;
     shared_bucket_keys.reserve(bucket_to_docs.size());
     for (const auto& kv : bucket_to_insts) {
         if (kv.second.size() >= 2U) {
@@ -442,7 +442,7 @@ int RunPipeline(const PipelineConfig& cfg, PipelineStats& stats) {
 
     std::unordered_map<int, std::vector<uint32_t>> encrypted_by_doc;
     encrypted_by_doc.reserve(requested_doc_set.size());
-    const uint64_t nonce = StableNonce("pri_cpu_global_compare_domain");
+    const uint64_t nonce = std::hash<std::string>{}("pri_cpu_global_compare_domain");
 
     for (auto& request_kv : requested_by_inst) {
         std::vector<int>& inst_requested_docs = request_kv.second;

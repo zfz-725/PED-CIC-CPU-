@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -165,6 +166,43 @@ std::string NormalizeUtf8ForDedup(const std::string& text, const LshConfig& cfg,
 }
 
 std::string ExtractText(const std::string& line) {
+    // 快速路径：标准 JSONL 格式 {"text": "..."}
+    if (line.size() > 10 && line[0] == '{' && line[1] == '"' && line[2] == 't' &&
+        line[3] == 'e' && line[4] == 'x' && line[5] == 't' && line[6] == '"') {
+        size_t i = 7;  // 跳过 {"text"
+        while (i < line.size() && (line[i] == ' ' || line[i] == '\t' || line[i] == ':')) ++i;
+        if (i < line.size() && line[i] == '"') {
+            ++i;  // 跳过开始引号
+            std::string raw;
+            raw.reserve(line.size() - i);
+            bool escaped = false;
+            for (; i < line.size(); ++i) {
+                const char c = line[i];
+                if (escaped) {
+                    raw.push_back('\\');
+                    raw.push_back(c);
+                    escaped = false;
+                } else if (c == '\\') {
+                    escaped = true;
+                } else if (c == '"') {
+                    return JsonUnescape(raw);
+                } else {
+                    raw.push_back(c);
+                }
+            }
+            if (escaped) raw.push_back('\\');
+            return JsonUnescape(raw);
+        }
+        // 非字符串值 ("text": 123)
+        if (i < line.size()) {
+            size_t end = i;
+            while (end < line.size() && line[end] != ',' && line[end] != '}') ++end;
+            return Trim(line.substr(i, end - i));
+        }
+        return "";
+    }
+
+    // 回退：搜索 "text" 键
     const auto key_pos = line.find("\"text\"");
     if (key_pos == std::string::npos) return line;
     const auto colon_pos = line.find(':', key_pos);
@@ -180,6 +218,7 @@ std::string ExtractText(const std::string& line) {
 
     ++i;
     std::string raw;
+    raw.reserve(line.size() - i);
     bool escaped = false;
     for (; i < line.size(); ++i) {
         const char c = line[i];
@@ -252,9 +291,6 @@ static uint32_t HashBandValues(const std::vector<uint32_t>& signature, int band,
     }
     h ^= h >> 16;
     h *= 0x85ebca6bU;
-    h ^= h >> 13;
-    h *= 0xc2b2ae35U;
-    h ^= h >> 16;
     return h;
 }
 
@@ -271,15 +307,21 @@ std::vector<uint32_t> ComputeBuckets(const std::vector<uint32_t>& signature, con
     return buckets;
 }
 
-std::string BucketKey(int band, uint32_t bucket_id) {
-    return std::to_string(band) + "#" + std::to_string(bucket_id);
+uint64_t MakeBucketKey(int band, uint32_t bucket_id) {
+    return (static_cast<uint64_t>(band) << 32) | bucket_id;
 }
 
-int CountEqualHashes(const std::vector<uint32_t>& left, const std::vector<uint32_t>& right) {
+int CountEqualHashes(const uint32_t* left, const uint32_t* right, int n) {
     int count = 0;
-    const size_t n = std::min(left.size(), right.size());
-    for (size_t i = 0; i < n; ++i) {
-        if (left[i] == right[i]) ++count;
+    int i = 0;
+    for (; i + 8 <= n; i += 8) {
+        count += (left[i] == right[i]) + (left[i+1] == right[i+1]) +
+                 (left[i+2] == right[i+2]) + (left[i+3] == right[i+3]) +
+                 (left[i+4] == right[i+4]) + (left[i+5] == right[i+5]) +
+                 (left[i+6] == right[i+6]) + (left[i+7] == right[i+7]);
+    }
+    for (; i < n; ++i) {
+        count += (left[i] == right[i]);
     }
     return count;
 }
@@ -336,37 +378,78 @@ LshStats RunDirectory(const fs::path& input_dir, const fs::path& output_dir, con
     LshStats stats;
     std::vector<FileResult> file_results;
     std::vector<DocRef> docs;
+
+    // 预分配：根据文件大小估算文档数
+    {
+        size_t total_bytes = 0;
+        int file_count = 0;
+        for (const auto& file : SortedFiles(input_dir)) {
+            std::error_code ec;
+            const auto sz = fs::file_size(file, ec);
+            if (!ec) total_bytes += sz;
+            ++file_count;
+        }
+        // 假设每行平均 200 字节，预留 1.5 倍余量
+        const size_t estimated_docs = std::max(total_bytes / 180, size_t{1}) * 3 / 2;
+        docs.reserve(estimated_docs);
+        file_results.reserve(static_cast<size_t>(file_count));
+    }
+
     const int cols = cfg.num_hash + cfg.bands;
 
     for (const auto& file : SortedFiles(input_dir)) {
-        std::ifstream in(file);
-        if (!in.is_open()) {
-            throw std::runtime_error("无法打开输入文件: " + file.string());
+        // 先读取文件全部行
+        std::vector<std::string> lines;
+        {
+            std::ifstream in(file);
+            if (!in.is_open()) {
+                throw std::runtime_error("无法打开输入文件: " + file.string());
+            }
+            std::string line;
+            while (std::getline(in, line)) {
+                lines.push_back(std::move(line));
+            }
         }
 
+        const int n_lines = static_cast<int>(lines.size());
         FileResult result;
         result.source = file;
-        std::string line;
-        while (std::getline(in, line)) {
-            std::string text = NormalizeUtf8ForDedup(ExtractText(line), cfg, stats);
-            if (cfg.min_text_len > 0 && static_cast<int>(text.size()) < cfg.min_text_len) {
+        result.lines = n_lines;
+        result.row_major.resize(static_cast<size_t>(n_lines) * static_cast<size_t>(cols));
+
+        std::vector<std::vector<uint32_t>> temp_sigs(static_cast<size_t>(n_lines));
+        std::vector<std::vector<uint32_t>> temp_buckets(static_cast<size_t>(n_lines));
+
+        const bool need_normalize = cfg.normalize_utf8;
+        const int min_len = cfg.min_text_len;
+
+#pragma omp parallel for schedule(dynamic, 32)
+        for (int li = 0; li < n_lines; ++li) {
+            std::string text = ExtractText(lines[li]);
+            if (need_normalize) text = NormalizeUtf8ForDedup(text, cfg, stats);
+            if (min_len > 0 && static_cast<int>(text.size()) < min_len) {
                 text.clear();
             }
-            auto signature = ComputeSignature(text, cfg);
-            auto buckets = ComputeBuckets(signature, cfg);
+            temp_sigs[static_cast<size_t>(li)] = ComputeSignature(text, cfg);
+            temp_buckets[static_cast<size_t>(li)] = ComputeBuckets(temp_sigs[static_cast<size_t>(li)], cfg);
 
-            result.row_major.insert(result.row_major.end(), signature.begin(), signature.end());
-            result.row_major.insert(result.row_major.end(), buckets.begin(), buckets.end());
-
-            DocRef ref;
-            ref.file_index = static_cast<int>(file_results.size());
-            ref.line_index = result.lines;
-            ref.signature = std::move(signature);
-            ref.buckets = std::move(buckets);
-            docs.push_back(std::move(ref));
-            ++result.lines;
-            ++stats.docs;
+            size_t base = static_cast<size_t>(li) * static_cast<size_t>(cols);
+            uint32_t* row = result.row_major.data() + base;
+            std::memcpy(row, temp_sigs[static_cast<size_t>(li)].data(), cfg.num_hash * sizeof(uint32_t));
+            std::memcpy(row + cfg.num_hash, temp_buckets[static_cast<size_t>(li)].data(), cfg.bands * sizeof(uint32_t));
         }
+
+        const int file_idx = static_cast<int>(file_results.size());
+        for (int li = 0; li < n_lines; ++li) {
+            DocRef ref;
+            ref.file_index = file_idx;
+            ref.line_index = li;
+            ref.signature = std::move(temp_sigs[static_cast<size_t>(li)]);
+            ref.buckets = std::move(temp_buckets[static_cast<size_t>(li)]);
+            docs.push_back(std::move(ref));
+        }
+        stats.docs += n_lines;
+
         if (cfg.keep_hash) {
             WriteHashBin(output_dir, result, cfg);
         }
@@ -378,10 +461,10 @@ LshStats RunDirectory(const fs::path& input_dir, const fs::path& output_dir, con
     stats.minhash_s = std::chrono::duration<double>(clock::now() - minhash_begin).count();
 
     const auto dedup_begin = clock::now();
-    std::unordered_map<std::string, std::vector<int>> bucket_to_docs;
+    std::unordered_map<uint64_t, std::vector<int>> bucket_to_docs;
     for (int doc_idx = 0; doc_idx < static_cast<int>(docs.size()); ++doc_idx) {
         for (int band = 0; band < cfg.bands; ++band) {
-            bucket_to_docs[BucketKey(band, docs[doc_idx].buckets[static_cast<size_t>(band)])].push_back(doc_idx);
+            bucket_to_docs[MakeBucketKey(band, docs[doc_idx].buckets[static_cast<size_t>(band)])].push_back(doc_idx);
         }
     }
 
@@ -398,7 +481,7 @@ LshStats RunDirectory(const fs::path& input_dir, const fs::path& output_dir, con
                 const int b = bucket_docs[j];
                 const uint64_t key = (static_cast<uint64_t>(a) << 32U) ^ static_cast<uint32_t>(b);
                 if (!seen_pairs.insert(key).second) continue;
-                if (CountEqualHashes(docs[a].signature, docs[b].signature) >= threshold_count) {
+                if (CountEqualHashes(docs[a].signature.data(), docs[b].signature.data(), cfg.num_hash) >= threshold_count) {
                     uf.Unite(a, b);
                     ++stats.local_duplicate_pairs;
                 }
