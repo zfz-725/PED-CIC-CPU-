@@ -14,7 +14,7 @@ void PrintUsage() {
               << "  ped_cic_lsh_cpu <输入目录> <输出目录> [--keep-hash|--no-keep-hash] "
               << "[--normalize-utf8|--no-normalize-utf8] "
               << "[--num-hash 128] [--bands 16] [--shingle-len 5] "
-              << "[--num-key 10240] [--threshold 0.8] [--min-text-len 0]\n";
+              << "[--num-key 10240] [--max-bucket 1] [--threshold 0.8] [--min-text-len 0]\n";
 }
 
 }
@@ -55,6 +55,8 @@ int main(int argc, char** argv) {
                 cfg.shingle_len = std::stoi(require_value(arg));
             } else if (arg == "--num-key") {
                 cfg.num_key = std::stoi(require_value(arg));
+            } else if (arg == "--max-bucket") {
+                cfg.max_bucket = std::stoi(require_value(arg));
             } else if (arg == "--threshold") {
                 cfg.threshold = std::stod(require_value(arg));
             } else if (arg == "--min-text-len") {

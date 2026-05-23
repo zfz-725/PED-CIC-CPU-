@@ -227,15 +227,29 @@ std::vector<uint32_t> ComputeSignature(const std::string& text, const LshConfig&
     return signature;
 }
 
+static uint32_t HashBandValues(const std::vector<uint32_t>& signature, int band,
+                                int rows_per_band, uint32_t seed) {
+    uint32_t h = static_cast<uint32_t>(band) * seed;
+    for (int i = band * rows_per_band; i < (band + 1) * rows_per_band; ++i) {
+        h ^= signature[static_cast<size_t>(i)] + seed + (h << 6) + (h >> 2);
+    }
+    h ^= h >> 16;
+    h *= 0x85ebca6bU;
+    h ^= h >> 13;
+    h *= 0xc2b2ae35U;
+    h ^= h >> 16;
+    return h;
+}
+
 std::vector<uint32_t> ComputeBuckets(const std::vector<uint32_t>& signature, const LshConfig& cfg) {
     std::vector<uint32_t> buckets(static_cast<size_t>(cfg.bands), 0U);
     const int rows_per_band = cfg.num_hash / cfg.bands;
     for (int band = 0; band < cfg.bands; ++band) {
-        uint32_t sum = 0;
-        for (int i = band * rows_per_band; i < (band + 1) * rows_per_band; ++i) {
-            sum += signature[static_cast<size_t>(i)];
-        }
-        buckets[static_cast<size_t>(band)] = sum % static_cast<uint32_t>(cfg.num_key);
+        const uint32_t level1 = HashBandValues(signature, band, rows_per_band, 0x9e3779b9U)
+                                % static_cast<uint32_t>(cfg.num_key);
+        const uint32_t level2 = HashBandValues(signature, band, rows_per_band, 0x27d4eb2dU)
+                                % static_cast<uint32_t>(cfg.max_bucket);
+        buckets[static_cast<size_t>(band)] = level1 * static_cast<uint32_t>(cfg.max_bucket) + level2;
     }
     return buckets;
 }

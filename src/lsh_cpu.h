@@ -9,6 +9,7 @@ struct LshConfig {
     int bands = 16;
     int shingle_len = 5;
     int num_key = 10240;
+    int max_bucket = 1;  // >1 enables two-level hashing: effective buckets = num_key * max_bucket
     double threshold = 0.8;
     int min_text_len = 0;
     bool keep_hash = true;
