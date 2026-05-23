@@ -199,27 +199,44 @@ std::string ExtractText(const std::string& line) {
     return JsonUnescape(raw);
 }
 
-uint32_t HashWindow(const std::string& text, size_t begin, size_t len, uint32_t p, uint32_t q) {
-    uint32_t h = 0;
-    for (size_t i = 0; i < len; ++i) {
-        h = (static_cast<uint64_t>(h) * p + static_cast<unsigned char>(text[begin + i])) % q;
-    }
-    return h;
-}
-
 std::vector<uint32_t> ComputeSignature(const std::string& text, const LshConfig& cfg) {
     std::vector<uint32_t> signature(static_cast<size_t>(cfg.num_hash), 0U);
     if (text.empty()) return signature;
     const int ngram = std::min(cfg.shingle_len, static_cast<int>(text.size()));
+    const size_t n = text.size();
+
     for (int hash_idx = 0; hash_idx < cfg.num_hash; ++hash_idx) {
         const uint32_t q = 4294967U;
         const uint32_t p = static_cast<uint32_t>(257 + hash_idx);
         uint32_t best = q - 1U;
+
         if (cfg.shingle_len == 1) {
-            best = HashWindow(text, 0, text.size(), p, q);
+            uint32_t h = 0;
+            for (size_t i = 0; i < n; ++i)
+                h = (static_cast<uint64_t>(h) * p + static_cast<unsigned char>(text[i])) % q;
+            best = h;
         } else {
-            for (size_t i = 0; i + static_cast<size_t>(ngram) <= text.size(); ++i) {
-                best = std::min(best, HashWindow(text, i, static_cast<size_t>(ngram), p, q));
+            // 预计算 r = (q - p^L) mod q = -p^L mod q (与 SEDD GPU 实现一致)
+            // r = (q-1) * p^L % q, 用加法替代减法, 避免分支
+            uint32_t r_val = q - 1U;
+            for (int k = 0; k < ngram; ++k)
+                r_val = static_cast<uint32_t>((static_cast<uint64_t>(r_val) * p) % q);
+
+            // 计算第一个 shingle
+            uint32_t h = 0;
+            for (int k = 0; k < ngram; ++k)
+                h = (static_cast<uint64_t>(h) * p + static_cast<unsigned char>(text[k])) % q;
+            best = h;
+
+            // 滚动哈希 (与 SEDD GPU hash_string_kernel_lsh 一致):
+            //   h' = (h * p + text[i-L] * r + text[i]) % q
+            //   其中 r = -p^L mod q, 所以 text[i-L]*r ≡ -text[i-L]*p^L mod q
+            for (size_t i = static_cast<size_t>(ngram); i < n; ++i) {
+                h = static_cast<uint32_t>(
+                    (static_cast<uint64_t>(h) * p +
+                     static_cast<uint64_t>(static_cast<uint8_t>(text[i - static_cast<size_t>(ngram)])) * r_val +
+                     static_cast<uint8_t>(text[i])) % q);
+                if (h < best) best = h;
             }
         }
         signature[static_cast<size_t>(hash_idx)] = best;
