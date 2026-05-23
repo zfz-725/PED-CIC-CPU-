@@ -108,6 +108,44 @@ std::vector<uint32_t> LoadBucketAssignmentsBin(const fs::path& bin_path, int row
     return data;
 }
 
+struct HashBinCache {
+    int cols = 0;
+    int num_hash = 0;
+    std::vector<uint32_t> row_major;
+};
+
+HashBinCache LoadHashBinFile(const fs::path& bin_path, int num_hash, int bands) {
+    std::ifstream in(bin_path, std::ios::binary | std::ios::ate);
+    if (!in.is_open()) {
+        throw std::runtime_error("无法打开哈希结果文件: " + bin_path.string());
+    }
+    const auto file_size = in.tellg();
+    if (file_size < 0) {
+        throw std::runtime_error("无法获取文件大小: " + bin_path.string());
+    }
+    const int cols = num_hash + bands;
+    const size_t total_elems = static_cast<size_t>(file_size) / sizeof(uint32_t);
+    in.seekg(0, std::ios::beg);
+    HashBinCache cache;
+    cache.cols = cols;
+    cache.num_hash = num_hash;
+    cache.row_major.resize(total_elems);
+    in.read(reinterpret_cast<char*>(cache.row_major.data()),
+            static_cast<std::streamsize>(total_elems * sizeof(uint32_t)));
+    if (!in.good()) {
+        throw std::runtime_error("读取哈希结果文件失败: " + bin_path.string());
+    }
+    return cache;
+}
+
+void ExtractSignatureFromCache(const HashBinCache& cache, int line_index,
+                               std::vector<uint32_t>& out) {
+    out.resize(static_cast<size_t>(cache.num_hash));
+    const size_t base = static_cast<size_t>(line_index) * static_cast<size_t>(cache.cols);
+    std::copy_n(cache.row_major.begin() + static_cast<long>(base),
+                cache.num_hash, out.begin());
+}
+
 std::vector<uint32_t> LoadSignatureForDoc(const LocalDocRef& ref, int num_hash, int bands) {
     std::ifstream in(ref.hash_path, std::ios::binary);
     if (!in.is_open()) {
@@ -168,6 +206,23 @@ std::unordered_map<int, std::vector<uint32_t>> InstitutionEncryptHandler(
     uint64_t nonce,
     int64_t& requested_unique_signatures,
     int64_t& encrypted_feature_words) {
+    std::unordered_set<fs::path> needed_files;
+    needed_files.reserve(32);
+    for (int doc_idx : requested_docs) {
+        auto local_it = inst_state.local_docs.find(doc_idx);
+        if (local_it == inst_state.local_docs.end()) {
+            throw std::runtime_error("机构本地文档索引缺失，doc_idx=" + std::to_string(doc_idx));
+        }
+        needed_files.insert(local_it->second.hash_path);
+    }
+
+    std::unordered_map<fs::path, HashBinCache> file_cache;
+    file_cache.reserve(needed_files.size());
+    for (const auto& path : needed_files) {
+        file_cache.emplace(path, LoadHashBinFile(path, cfg.num_hash, cfg.bands));
+    }
+
+    std::vector<uint32_t> sig_buffer(static_cast<size_t>(cfg.num_hash));
     std::unordered_map<SignatureKey, size_t, SignatureKeyHash> signature_to_unique;
     signature_to_unique.reserve(requested_docs.size());
     std::vector<std::vector<uint32_t>> unique_signatures;
@@ -176,11 +231,10 @@ std::unordered_map<int, std::vector<uint32_t>> InstitutionEncryptHandler(
 
     for (size_t i = 0; i < requested_docs.size(); ++i) {
         const int doc_idx = requested_docs[i];
-        auto local_it = inst_state.local_docs.find(doc_idx);
-        if (local_it == inst_state.local_docs.end()) {
-            throw std::runtime_error("机构本地文档索引缺失，doc_idx=" + std::to_string(doc_idx));
-        }
-        SignatureKey key{LoadSignatureForDoc(local_it->second, cfg.num_hash, cfg.bands)};
+        const auto& ref = inst_state.local_docs.at(doc_idx);
+        const auto& cache = file_cache.at(ref.hash_path);
+        ExtractSignatureFromCache(cache, ref.line_index, sig_buffer);
+        SignatureKey key{sig_buffer};
         auto inserted = signature_to_unique.emplace(std::move(key), unique_signatures.size());
         if (inserted.second) {
             unique_signatures.push_back(inserted.first->first.values);
